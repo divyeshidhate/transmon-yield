@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yieldkit"
+version = "0.1.0"
+description = "Ranking superconducting-qubit dies before cooldown from room-temperature junction data: a reproduction of published results and a simulation study."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.0",
+    "scipy>=1.13",
+    "pandas>=2.2",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "scqubits>=4.0"]
+notebooks = ["nbformat>=5.9", "nbclient>=0.10", "ipykernel>=6.29"]
+all = ["yieldkit[test,notebooks]"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
