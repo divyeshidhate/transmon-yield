@@ -17,8 +17,15 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize_scalar
 
-from yieldkit.collisions import count_collisions, directed_edges, spectator_triples
-from yieldkit.physics import f01_from_rn, gap_from_tc
+from yieldkit.collisions import ALPHA_HZ, count_collisions, directed_edges, spectator_triples
+from yieldkit.physics import (
+    alpha_scaled_to_design,
+    charging_energy,
+    critical_current,
+    f01_from_rn_second_order,
+    gap_from_tc,
+    josephson_energy,
+)
 
 DIE = ["wafer_id", "die_id"]
 
@@ -37,9 +44,12 @@ class Calibration:
 def calibrate(observed: pd.DataFrame, cq_f: float, tc_bounds_k: tuple[float, float] = (0.3, 1.5)) -> Calibration:
     """Fit effective Tc on cooled dies, then split the residual into die-shared and per-qubit parts.
 
-    1. Tc: least squares  min_Tc sum (f_meas - Eq1(Rn_meas; Tc, Cq))^2
-       (Eq. 1 of Mayer, Weber et al., arXiv:2505.08424; Tc as the only free parameter,
-       as in Lang et al. 2025, Sec. IV.2).
+    1. Tc: least squares  min_Tc sum (f_meas - f2(Rn_meas; Tc, Cq))^2, f2 = Ambegaokar-Baratoff +
+       second-order transmon formula (Krizan, PhD thesis, Chalmers 2026, Eq. 4.3; Eq. 1 of
+       Mayer, Weber et al., arXiv:2505.08424 with the next two terms; Tc as the only free parameter,
+       as in Lang et al. 2025, Sec. IV.2). The fitted Tc is effective: Tc_eff = Tc / (R_cold/R_RT),
+       because Tc and the cold/warm resistance ratio enter EJ only as Tc / (ratio * R_RT)
+       (yieldkit.physics.gap_from_tc). One design here, so one scale.
     2. Residual r = f_meas - f_pred, one-way random-effects split (standard ANOVA estimators):
          sigma_qubit^2 = pooled within-die variance (dof = n - 1 per die)
          sigma_die^2   = max(0, var(die means) - sigma_qubit^2 / n)
@@ -56,10 +66,10 @@ def calibrate(observed: pd.DataFrame, cq_f: float, tc_bounds_k: tuple[float, flo
     fm = cooled["f01_measured_hz"].to_numpy()
 
     def sse(tc: float) -> float:
-        return float(np.sum((f01_from_rn(rn, cq_f, gap_from_tc(tc)) - fm) ** 2))
+        return float(np.sum((f01_from_rn_second_order(rn, cq_f, gap_from_tc(tc)) - fm) ** 2))
 
     tc = float(minimize_scalar(sse, bounds=tc_bounds_k, method="bounded", options={"xatol": 1e-7}).x)
-    r = pd.Series(fm - f01_from_rn(rn, cq_f, gap_from_tc(tc)), index=cooled.index)
+    r = pd.Series(fm - f01_from_rn_second_order(rn, cq_f, gap_from_tc(tc)), index=cooled.index)
     groups = r.groupby([cooled["wafer_id"], cooled["die_id"]])
     n = groups.size().to_numpy()
     within_ss = float(((r - groups.transform("mean")) ** 2).sum())
@@ -70,8 +80,8 @@ def calibrate(observed: pd.DataFrame, cq_f: float, tc_bounds_k: tuple[float, flo
 
 
 def predict_f01(observed: pd.DataFrame, cal: Calibration) -> np.ndarray:
-    """Predicted f01 [Hz] for every row: Eq. 1 with measured Rn and calibrated Tc."""
-    return f01_from_rn(observed["rn_measured_ohm"].to_numpy(), cal.cq_f, gap_from_tc(cal.tc_k))
+    """Predicted f01 [Hz] for every row: second-order formula with measured Rn and calibrated Tc."""
+    return f01_from_rn_second_order(observed["rn_measured_ohm"].to_numpy(), cal.cq_f, gap_from_tc(cal.tc_k))
 
 
 def _uncooled_matrix(observed: pd.DataFrame, n_qubits: int) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -96,6 +106,9 @@ def score_dies(
     For each die, draw n_samples chips from the predictive distribution
         f_q = f_pred,q + d + e_q,   d ~ N(0, sigma_die),  e_q ~ N(0, sigma_qubit)
     and count Table 1 collisions (Hertzberg et al. 2021) with the fixed design's control/target roles.
+    Each qubit's anharmonicity is predicted from its measured Rn (calibrated EJ) and the design EC with
+    Eq. 4.11 of Krizan, PhD thesis, Chalmers 2026 (physics.alpha_scaled_to_design): -330 MHz on design
+    (Hertzberg Table 1 caption), moving with EJ through xi. Same physics as the truth; only measured data used.
 
     Returns:
         DataFrame: wafer_id, die_id, p_collision_free, expected_collisions.
@@ -103,6 +116,10 @@ def score_dies(
     n_q = len(design_hz)
     unc, dies = _uncooled_matrix(observed, n_q)
     f_pred = predict_f01(unc, cal).reshape(len(dies), 1, n_q)
+    ej = josephson_energy(critical_current(unc["rn_measured_ohm"].to_numpy(), gap_from_tc(cal.tc_k)))
+    f_d = np.asarray(design_hz)[unc["qubit_id"].to_numpy()]
+    ec_d = charging_energy(cal.cq_f)
+    alpha = alpha_scaled_to_design(ej, ec_d, f_d, ec_d, ALPHA_HZ).reshape(len(dies), 1, n_q)
     rng = np.random.default_rng(seed)
     shape = (len(dies), n_samples)
     f = (
@@ -112,7 +129,7 @@ def score_dies(
     )
     directed = directed_edges(edges, design_hz)
     triples = spectator_triples(directed, n_q)
-    total = sum(count_collisions(f, directed, triples).values())
+    total = sum(count_collisions(f, directed, triples, alpha).values())
     out = dies.copy()
     out["p_collision_free"] = np.mean(total == 0, axis=1)
     out["expected_collisions"] = np.mean(total, axis=1)

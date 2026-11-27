@@ -81,7 +81,8 @@ def test_calibration_splits_die_shared_residual():
 
 
 def test_perfect_information_equals_oracle():
-    """Zero residual, zero probe and cryo noise -> P(collision-free) is 0/1 and matches truth exactly."""
+    """Zero residual, zero probe and cryo noise -> P(collision-free) is 0/1 and matches truth exactly.
+    Needs the scorer and the truth to share the alpha model (Eq. 4.11 from EJ and EC, Step 8c)."""
     cfg = replace(wafer_config(SC, RN_RSD_AS_FAB, 0.0, probe_noise_rsd=0.0), f01_residual_rsd=0.0)
     obs, truth = make_wafer(cfg, seed=5)
     res = evaluate_wafer(obs, truth, SC, n_samples=20)
@@ -194,16 +195,26 @@ def test_ec_die_split_moves_variance_to_die_part():
     assert cal.sigma_qubit_hz < 0.8 * _expected_ec_extra_hz()
 
 
-def test_true_alpha_follows_ec_and_defaults_are_unchanged():
+def test_true_alpha_follows_ec_and_ej():
+    """Step 8c: alpha_q from thesis Eq. 4.11 with the qubit's own EJ and EC (Krizan, PhD thesis, Chalmers 2026).
+    (i) a qubit exactly on design keeps alpha = -330 MHz (Hertzberg et al. 2021, Table 1 caption);
+    (ii) with 0.8% EC scatter (Osman et al. 2023) the alpha spread is ~0.9%, not 0.8%: Eq. 4.11 gives
+         d ln|alpha| / d ln EC = 1.09 and d ln|alpha| / d ln EJ = -0.09 at this design (EJ/EC ~ 46), so
+         sqrt((1.09 * 0.8%)^2 + (0.09 * 2% Rn)^2) = 0.90% (band 0.85-0.95%: our tolerance);
+    (iii) without EC scatter, alpha now moves with the Rn scatter through EJ, but by < 1 MHz rms (our bound)."""
+    from yieldkit.scenario import TC_NOMINAL_K
+
+    on_design = pd.DataFrame({"qubit_id": np.arange(len(SC.design_hz)), "rn_cooldown_ohm": SC.rn_target_ohm,
+                              "tc_eff_true_k": TC_NOMINAL_K, "cq_true_f": SC.cq_f})
+    assert np.allclose(true_alpha_hz(on_design, SC.cq_f, SC.design_hz), ALPHA_HZ, rtol=1e-9)
+
     obs, truth = make_wafer(wafer_config(SC, RN_RSD_AS_FAB, 0.0, ec_rsd=EC_RSD_OSMAN), seed=12)
-    alpha = true_alpha_hz(truth, SC.cq_f)
-    assert np.std(alpha) / abs(np.mean(alpha)) == pytest.approx(EC_RSD_OSMAN, rel=0.1)
-    # Without capacitor scatter the per-qubit alpha is exactly the design value, so Step 4 is unchanged.
+    alpha = true_alpha_hz(truth, SC.cq_f, SC.design_hz)
+    assert 0.85e-2 < np.std(alpha) / abs(np.mean(alpha)) < 0.95e-2
+
     obs0, truth0 = make_wafer(wafer_config(SC, RN_RSD_AS_FAB, RESID_IBM_HZ), seed=12)
-    assert np.all(true_alpha_hz(truth0, SC.cq_f) == ALPHA_HZ)
-    a = true_collision_free(truth0, SC.design_hz, SC.lattice.edges)
-    b = true_collision_free(truth0, SC.design_hz, SC.lattice.edges, cq_design_f=SC.cq_f)
-    assert a.equals(b)
+    a0 = true_alpha_hz(truth0, SC.cq_f, SC.design_hz)
+    assert 0 < np.std(a0) < 1e6
 
 
 # ---------------- Step 6b: junction ageing between RT probe and cooldown ----------------
@@ -234,16 +245,17 @@ def test_additive_common_offset_leaves_collisions_identical():
 def test_shared_drift_compresses_gaps_and_biases_absolute_prediction():
     """A shared Rn increase d is NOT a pure common offset: f + EC/h scales as (1+d)^(-1/2), so the
     gaps between qubits shrink by that factor while alpha (set by EC) does not. Expected:
-    (i) RT-explained gaps scale exactly by (1+d)^(-1/2); (ii) with a calibration from an un-aged
-    wafer, prediction is biased by ~(f + EC/h) d / 2; (iii) recalibrating absorbs it exactly
-    (Tc -> Tc/(1+d)), because Rn and Tc enter Eq. 1 only as Tc/Rn."""
+    (i) RT-explained gaps scale by (1+d)^(-1/2) -- exactly for Eq. 1; with the second-order terms of
+    the truth model (Krizan thesis 2026, Eq. 4.3) to within 0.1% (measured: 45 kHz, 0.017%);
+    (ii) with a calibration from an un-aged wafer, prediction is biased by ~(f + EC/h) d / 2;
+    (iii) recalibrating absorbs it exactly (Tc -> Tc/(1+d)), because Rn and Tc enter EJ only as Tc/Rn."""
     d = 0.04  # Osman et al. 2023: +4% over 21 days
     o0, t0 = make_wafer(wafer_config(SC, RN_RSD_AS_FAB, RESID_IBM_HZ), seed=0)
     o1, t1 = make_wafer(wafer_config(SC, RN_RSD_AS_FAB, RESID_IBM_HZ, drift_shared_rel=d), seed=0)
     resid = _f_matrix(t0, "f01_resid_qubit_hz") + _f_matrix(t0, "f01_resid_die_hz")
     F0, F1 = _f_matrix(t0) - resid, _f_matrix(t1) - resid  # RT-explained part
     e = SC.lattice.edges
-    assert np.allclose(F1[:, e[:, 0]] - F1[:, e[:, 1]], (F0[:, e[:, 0]] - F0[:, e[:, 1]]) * (1 + d) ** -0.5, rtol=1e-9)
+    assert np.allclose(F1[:, e[:, 0]] - F1[:, e[:, 1]], (F0[:, e[:, 0]] - F0[:, e[:, 1]]) * (1 + d) ** -0.5, rtol=1e-3)
 
     cal0, cal1 = calibrate(o0, SC.cq_f), calibrate(o1, SC.cq_f)
     unc = ~o1["is_cooled"].to_numpy()
@@ -267,11 +279,28 @@ def test_junction_drift_adds_residual_in_quadrature():
     assert np.sqrt(c1.sigma_qubit_hz**2 - c0.sigma_qubit_hz**2) == pytest.approx(expected, rel=0.07)
 
 
-def test_defaults_reproduce_step4_headline():
-    """No EC scatter, no ageing: notebook 04 headline (seed 0) is unchanged: gain 0.61, 24 vs ~129 cooldowns."""
-    obs, truth = make_wafer(wafer_config(SC, RN_RSD_AS_FAB, RESID_IBM_HZ), seed=0)
-    r = evaluate_wafer(obs, truth, SC, seed=0)
-    assert r["n_good"] == 13
-    assert r["gain_ours"] == pytest.approx(0.613, abs=0.001)
-    assert r["cool_ours"] == 24
-    assert r["cool_random"] == pytest.approx(128.93, abs=0.01)
+def test_defaults_headline_robust_properties():
+    """Notebook 04 defaults (no EC scatter, no ageing), seeds 0-4: properties that hold on every seed, not
+    single-seed values. Over 10 seeds (Step 8c, 2026-11-27) gain was 0.631 +/- 0.086 (min 0.50) and our
+    ranking beat naive and random on 10/10; one die flipping at a +/-4 MHz window edge moves a single seed's
+    cooldowns-to-5 by up to 20, so exact per-seed values are not pinned."""
+    for seed in range(5):
+        obs, truth = make_wafer(wafer_config(SC, RN_RSD_AS_FAB, RESID_IBM_HZ), seed=seed)
+        r = evaluate_wafer(obs, truth, SC, seed=seed)
+        assert r["n_good"] >= 5
+        assert r["gain_ours"] > r["gain_naive"]
+        assert r["gain_ours"] > 0.4  # our floor, below the 10-seed minimum 0.50
+        assert r["cool_ours"] < r["cool_random"]
+        assert r["cool_oracle"] == 5
+
+
+def test_fitted_tc_absorbs_cold_warm_ratio():
+    """Step 8b: if the truth's cold resistance is k * R_RT, the Tc fitted on R_RT comes out as Tc/k and the
+    predictions are unchanged -- a separate k parameter could not be fitted. k = 1.1375 (Krizan thesis p. 49)."""
+    k = 1.1375
+    obs, _ = make_wafer(wafer_config(SC, RN_RSD_AS_FAB, RESID_IBM_HZ), seed=0)
+    cal = calibrate(obs, SC.cq_f)
+    scaled = obs.assign(rn_measured_ohm=obs["rn_measured_ohm"] * k)  # analyst given cold-like resistances
+    cal_k = calibrate(scaled, SC.cq_f)
+    assert cal_k.tc_k == pytest.approx(cal.tc_k * k, rel=1e-5)
+    assert np.allclose(predict_f01(scaled, cal_k), predict_f01(obs, cal), rtol=1e-6)

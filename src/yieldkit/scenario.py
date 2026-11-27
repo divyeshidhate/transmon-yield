@@ -20,7 +20,7 @@ import numpy as np
 
 from yieldkit.collisions import ALPHA_HZ
 from yieldkit.lattices import Lattice, build_lattice, design_frequencies
-from yieldkit.physics import cq_for_anharmonicity, gap_from_tc, rn_target_for_f01
+from yieldkit.physics import cq_for_anharmonicity, f01_from_rn_second_order, gap_from_tc, rn_target_for_f01
 from yieldkit.wafer import WaferConfig
 
 F1_HZ = 5.00e9  # Hertzberg et al. 2021, Discussion example f1 = 5.0 GHz
@@ -65,7 +65,8 @@ def make_scenario(tc_nominal_k: float = TC_NOMINAL_K) -> Scenario:
     design = design_frequencies(lat, F1_HZ, STEP_HZ)
     cq = cq_for_anharmonicity(F1_HZ + STEP_HZ, ALPHA_HZ)
     gap = gap_from_tc(tc_nominal_k)
-    rn = np.array([rn_target_for_f01(f, cq, gap) for f in design])
+    # Second-order transmon formula (Krizan thesis 2026, Eq. 4.3), the same model wafer.py uses for the truth.
+    rn = np.array([rn_target_for_f01(f, cq, gap, model=f01_from_rn_second_order) for f in design])
     return Scenario(lat, design, cq, rn)
 
 

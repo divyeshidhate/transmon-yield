@@ -17,6 +17,7 @@ import pytest
 from yieldkit.imec import (
     add_design_offset_lodo,
     decompose_wafer,
+    fit_tc,
     good_junctions,
     load_imec,
     same_design_across_dies,
@@ -145,6 +146,16 @@ def test_design_offsets_inflate_raw_within_die_split():
     q = _synthetic_qubits()
     raw = split_die_within(q["resid_hz"], q["die"])
     assert raw["sigma_within"] > 2 * 250e6
+
+
+def test_fit_tc_returns_tc_over_cold_ratio():
+    """Step 8b: frequencies made with cold resistances k * R_RT and Tc = 1.16 K, fitted against R_RT, give
+    Tc_eff = 1.16 / k. k = 1.1375 and Tc ~ 1.16 K: Krizan, PhD thesis, Chalmers 2026, p. 49."""
+    k, tc = 1.1375, 1.16
+    rn_rt = np.array([4e3, 5e3, 6e3, 7e3, 8e3])
+    cq = np.full(5, 80e-15)
+    f = f01_from_rn_exact(k * rn_rt, cq, gap_from_tc(tc))
+    assert fit_tc(rn_rt, cq, f) == pytest.approx(tc / k, abs=2e-5)
 
 
 def test_split_needs_two_dies():

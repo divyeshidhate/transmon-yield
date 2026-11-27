@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import brentq
 
-from yieldkit.physics import f01_from_rn, gap_from_tc
+from yieldkit.physics import f01_from_rn, f01_from_rn_second_order, gap_from_tc
 
 KEYS = ["wafer_id", "die_id", "qubit_id"]
 
@@ -145,7 +145,9 @@ def make_wafer(cfg: WaferConfig, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]
         trend      = radial bowl (r^2) + linear tilt (random direction), unit-normalised
         Rn_measured = Rn_true * (1 + probe noise)
         Cq_true    = Cq_design * (1 + cq noise)
-        f01_true   = Eq. 1 (arXiv:2505.08424) with the wafer's true Tc and Cq_true
+        f01_true   = second-order transmon formula (Krizan, PhD thesis, Chalmers 2026, Eq. 4.3) with
+                     Ambegaokar-Baratoff, the wafer's true Tc and Cq_true (Eq. 1 of arXiv:2505.08424 is
+                     ~13 MHz high at EJ/EC ~ 53, so the truth no longer uses it)
         f01_measured = f01_true * (1 + ageing_shift) * (1 + residual noise), cooled dies only
 
     Args:
@@ -199,7 +201,7 @@ def make_wafer(cfg: WaferConfig, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]
         rn_cool = rn_true * (1.0 + cfg.rn_drift_shared_rel)
         if cfg.rn_drift_junction_rsd > 0:  # drawn only when used: default random sequence unchanged
             rn_cool = rn_cool * (1.0 + rng.normal(0.0, cfg.rn_drift_junction_rsd, rn_true.size))
-        f01_true = f01_from_rn(rn_cool, cq_true, gap_from_tc(tc))
+        f01_true = f01_from_rn_second_order(rn_cool, cq_true, gap_from_tc(tc))
         resid_die = np.zeros(rn_true.size)
         resid_qubit = np.zeros(rn_true.size)
         if cfg.f01_resid_die_hz > 0:

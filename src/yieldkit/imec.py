@@ -29,7 +29,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize_scalar
 
-from yieldkit.physics import E_CHARGE, H_PLANCK, cq_for_anharmonicity, f01_from_rn_exact, gap_from_tc
+from yieldkit.physics import E_CHARGE, H_PLANCK, cq_for_anharmonicity, ej_ec_from_f01_alpha, f01_from_rn_exact, gap_from_tc
 
 ZENODO_RECORD = "13143313"
 ZENODO_URL = f"https://zenodo.org/records/{ZENODO_RECORD}/files/{{name}}?download=1"
@@ -244,6 +244,10 @@ def fit_tc(rn: np.ndarray, cq: np.ndarray, f_meas: np.ndarray, bounds_k=(0.3, 1.
     """Effective Tc by least squares: min over Tc of sum (f_meas - f01_exact(Rn; Tc, Cq))^2 [K].
 
     Same one-parameter calibration as Step 4 (Lang et al., arXiv:2504.18173, Sec. IV.2 fit Tc the same way).
+
+    The fitted value is Tc_eff = Tc / k with k = R_cold / R_RT, plus the area estimate and the
+    qubit-vs-test-junction geometry: all of these only scale EJ, so one fit absorbs them together
+    (see yieldkit.physics.gap_from_tc). It is not a physical Tc.
     """
 
     def sse(tc: float) -> float:
@@ -340,6 +344,12 @@ def add_design_offset_lodo(p: pd.DataFrame) -> pd.DataFrame:
     above the chain prediction), and Cq per type is only a median. A per-design offset absorbs that
     fixed model bias without using the qubit's own die. Qubits whose design appears on no other die
     get NaN.
+
+    It also absorbs a per-design R_cold/R_RT ratio k (Step 8b): k only scales EJ, i.e. acts like a
+    per-design Tc_eff = Tc/k. Strictly that is a multiplicative scale, not an additive offset; on the
+    imec data (2026-11-27) fitting Tc_eff per design instead (leave-one-die-out) changed the within-die
+    and die-shared parts by 4 MHz each (267 vs 271 MHz, 112 vs 116 MHz), so the offset is a good
+    stand-in. No separate k parameter: it cannot be separated from Tc with room-temperature data.
     """
     p = p.copy()
     off = np.full(len(p), np.nan)
@@ -352,19 +362,34 @@ def add_design_offset_lodo(p: pd.DataFrame) -> pd.DataFrame:
     return p
 
 
+def qubit_ec_eq411(qubits: pd.DataFrame) -> np.ndarray:
+    """EC of each qubit [J] from its measured (f01, alpha) by the closed-form series; NaN if alpha missing.
+
+    Solves Eq. 4.3 (f01) and Eq. 4.11 (alpha) of Krizan, PhD thesis, Chalmers (2026) jointly
+    (physics.ej_ec_from_f01_alpha). A cross-check on the exact-diagonalisation EC of qubit_cq.
+    """
+    return np.array([ej_ec_from_f01_alpha(f, a)[1] if np.isfinite(a) else np.nan
+                     for f, a in zip(qubits["f01_hz"], qubits["alpha_hz"])])
+
+
 def ec_spread(p: pd.DataFrame, by: str = "qtype") -> pd.DataFrame:
     """Relative charging-energy spread per group (`by` = "qtype" or "design"), two ways [dimensionless].
 
-    approx:  EC ~ -alpha (transmon limit, Koch et al. 2007)  -> sd(alpha) / |mean(alpha)|
-    exact:   EC = e^2 / (2 Cq), Cq from (f01, alpha) by exact diagonalisation (qubit_cq)
-             -> sd(EC) / mean(EC); removes the part of the alpha spread that comes from EJ.
-    Expects columns alpha_hz, cq_each_f and the grouping column.
+    exact:   EC = e^2 / (2 Cq), Cq from (f01, alpha) by exact diagonalisation (qubit_cq) -> sd(EC) / mean(EC)
+    eq411:   EC from (f01, alpha) by Eqs. 4.3 + 4.11 of Krizan, PhD thesis, Chalmers 2026 (qubit_ec_eq411);
+             cross-check. Both remove the part of the alpha spread that comes from EJ. (Before Step 8c the
+             second column was EC ~ -alpha, Koch et al. 2007, which does not.)
+    Expects columns f01_hz, alpha_hz, cq_each_f and the grouping column.
     """
     rows = []
-    for key, g in p[np.isfinite(p["alpha_hz"])].groupby(by):
+    g_all = p[np.isfinite(p["alpha_hz"])]
+    ec411_all = pd.Series(qubit_ec_eq411(g_all), index=g_all.index) / H_PLANCK
+    for key, g in g_all.groupby(by):
         ec = E_CHARGE**2 / (2.0 * g["cq_each_f"]) / H_PLANCK
+        e4 = ec411_all.loc[g.index]
         rows.append({by: key, "n": len(g), "alpha_mean_mhz": g["alpha_hz"].mean() / 1e6, "ec_mean_mhz": ec.mean() / 1e6,
-                     "rsd_approx": g["alpha_hz"].std() / abs(g["alpha_hz"].mean()), "rsd_exact": ec.std() / ec.mean()})
+                     "rsd_exact": ec.std() / ec.mean(), "rsd_eq411": e4.std() / e4.mean(),
+                     "ec_eq411_minus_exact_pct": ((e4 / ec - 1) * 100).mean()})
     return pd.DataFrame(rows).set_index(by)
 
 
@@ -373,11 +398,13 @@ def ec_die_split(p: pd.DataFrame) -> dict:
 
     x_i = ln EC_i - mean over the same design of ln EC   (removes design-to-design differences)
     then split_die_within(x, die): die-shared and within-die relative spreads, dies with >= 2 qubits.
-    Done for EC_exact and for the approximation EC ~ -alpha.
+    Done for EC_exact and for EC from Eqs. 4.3 + 4.11 (Krizan thesis 2026); "approx" (EC ~ -alpha) is kept
+    only to show what Step 8c replaced.
     """
     g = p[np.isfinite(p["alpha_hz"])]
     out = {}
-    for name, ec in (("exact", E_CHARGE**2 / (2.0 * g["cq_each_f"])), ("approx", -g["alpha_hz"])):
+    ec411 = pd.Series(qubit_ec_eq411(g), index=g.index)
+    for name, ec in (("exact", E_CHARGE**2 / (2.0 * g["cq_each_f"])), ("eq411", ec411), ("approx", -g["alpha_hz"])):
         x = np.log(ec) - np.log(ec).groupby(g["design"]).transform("mean")
         s = split_die_within(x, g["die"])
         out[name] = {"n_dies": s["n_dies"], "n_qubits": s["n_qubits"], "rsd_within_die": s["sigma_within"],

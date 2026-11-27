@@ -9,9 +9,14 @@ Chain implemented here (the "RT -> f01" model used by Fraunhofer EMFT):
     Cq --> EC
     (EJ, EC) --(transmon asymptotic formula)--> f01
 
-Composed, this is exactly Eq. 1 of Mayer, Weber et al., arXiv:2505.08424 (2025):
+f01_from_rn uses the first-order formula sqrt(8 EJ EC) - EC, so that, composed, it is exactly
+Eq. 1 of Mayer, Weber et al., arXiv:2505.08424 (2025):
 
     f01 = sqrt( (1/Rn) * 0.882 * kB * Tc / (h * Cq) ) - e^2 / (2 * h * Cq)
+
+It is kept only to reproduce that paper. Our own synthetic chips and predictions use
+f01_from_rn_second_order (Krizan, PhD thesis, Chalmers 2026, Eq. 4.3), which is ~0.3 MHz
+from exact diagonalisation where Eq. 1 is ~13 MHz high (EJ/EC ~ 53).
 """
 
 from __future__ import annotations
@@ -45,6 +50,17 @@ def gap_from_tc(tc: float) -> float:
 
     Source: the factor 0.882 = 1.764/2 in Eq. 1 of Mayer, Weber et al.,
     arXiv:2505.08424 (2025).
+
+    Effective Tc and the room-temperature -> cryogenic resistance ratio (Step 8b):
+    the junction that sets EJ is the COLD one, R_cold = k * R_RT. With Ambegaokar-Baratoff and
+    Delta = 1.764 kB Tc,
+        EJ = (hbar/2e) * pi * Delta / (2 e R_cold)  proportional to  Tc / (k * R_RT),
+    so from room-temperature data alone Tc and k enter only as Tc/k and cannot be fitted separately.
+    A Tc fitted against R_RT is therefore an effective Tc_eff = Tc / k (times any other unmodelled
+    EJ scale, e.g. parasitic series resistance or a wrong area). Example: k = 1.1375 for Chalmers
+    Al/AlOx junctions (Krizan, PhD thesis, Chalmers 2026, p. 49), "generally not to be considered
+    universal" and only "a mere estimate of 14%" (p. 76). k depends on the junction and process,
+    so the scale must be fitted per design, not taken from another lab.
     """
     return BCS_GAP_RATIO * K_BOLTZMANN * tc
 
@@ -122,6 +138,113 @@ def transmon_f01(ej: float, ec: float) -> float:
     return (np.sqrt(8.0 * ej * ec) - ec) / H_PLANCK
 
 
+def transmon_f01_second_order(ej: float, ec: float) -> float:
+    """Transmon 0->1 frequency with the next two terms of the EJ >> EC expansion.
+
+    Equation:  h f01 = sqrt(8 EJ EC) - EC * (1 + xi/4 + 21 xi^2 / 128),   xi = sqrt(2 EC / EJ)
+
+    Args:
+        ej: Josephson energy [J] (scalar or array).
+        ec: charging energy [J] (scalar or array, broadcast with ej).
+
+    Returns:
+        f01 [Hz].
+
+    Source: Krizan, PhD thesis, Chalmers (2026), DOI 10.63959/chalmers.dt/5949, Eq. 4.3 (p. 49),
+    citing Koch et al. (2007). The thesis notes the first-order form (transmon_f01) is 6.7 MHz high
+    at EJ = 21.63 GHz, EC = 186.7 MHz (Sec. 4.2). Against exact diagonalisation it is within
+    0.3 MHz at EJ/EC ~ 53, where the first-order form is ~13 MHz high (see tests).
+    """
+    xi = np.sqrt(2.0 * ec / ej)
+    return (np.sqrt(8.0 * ej * ec) - ec * (1.0 + xi / 4.0 + 21.0 * xi**2 / 128.0)) / H_PLANCK
+
+
+def transmon_alpha_second_order(ej: float, ec: float) -> float:
+    """Transmon anharmonicity alpha = f12 - f01 from the EJ >> EC expansion.
+
+    Equation:  alpha = eta / 2pi = -(EC/h) * (1 + 9/16 xi + 81/128 xi^2 + 3645/4096 xi^3 + 46899/32768 xi^4),
+               xi = sqrt(2 EC / EJ)
+
+    Args:
+        ej: Josephson energy [J] (scalar or array).
+        ec: charging energy [J] (scalar or array).
+
+    Returns:
+        alpha [Hz] (negative).
+
+    Source: Krizan, PhD thesis, Chalmers (2026), DOI 10.63959/chalmers.dt/5949, Eq. 4.11 (p. 65).
+    Replaces the leading-order alpha ~ -EC (Koch et al. 2007), which is ~30 MHz too small in
+    magnitude at EJ/EC ~ 53 (see tests).
+    """
+    xi = np.sqrt(2.0 * ec / ej)
+    series = 1.0 + 9.0 / 16.0 * xi + 81.0 / 128.0 * xi**2 + 3645.0 / 4096.0 * xi**3 + 46899.0 / 32768.0 * xi**4
+    return -ec * series / H_PLANCK
+
+
+def ej_from_f01_second_order(f01: float, ec: float) -> float:
+    """Josephson energy that gives f01 at charging energy EC (inverse of transmon_f01_second_order).
+
+    Solves  transmon_f01_second_order(EJ, EC) = f01  for EJ in [2 EC, 5000 EC] with Brent's method
+    (Krizan, PhD thesis, Chalmers 2026, Eq. 4.3). The bracket is a numerical choice.
+
+    Args:
+        f01: transition frequency [Hz] (scalar).
+        ec: charging energy [J] (scalar).
+
+    Returns:
+        EJ [J].
+    """
+    return brentq(lambda ej: transmon_f01_second_order(ej, ec) - f01, 2.0 * ec, 5000.0 * ec, xtol=1e-40, rtol=1e-14)
+
+
+def ej_ec_from_f01_alpha(f01: float, alpha: float) -> tuple[float, float]:
+    """EJ and EC from a measured f01 and anharmonicity, closed-form series (no diagonalisation).
+
+    Solves jointly (Krizan, PhD thesis, Chalmers 2026):
+        Eq. 4.3:   h f01   = sqrt(8 EJ EC) - EC (1 + xi/4 + 21 xi^2/128)
+        Eq. 4.11:  alpha   = -(EC/h) (1 + 9/16 xi + 81/128 xi^2 + 3645/4096 xi^3 + 46899/32768 xi^4)
+    with xi = sqrt(2 EC / EJ): for each trial EC, EJ follows from Eq. 4.3; EC is then found so that
+    Eq. 4.11 matches alpha. The thesis does the same (Sec. 4.5.1). EC is searched in [0.5, 1.0] x h|alpha|
+    (the series makes |alpha| > EC); a numerical choice.
+
+    Args:
+        f01: transition frequency [Hz].
+        alpha: anharmonicity f12 - f01 [Hz] (negative).
+
+    Returns:
+        (EJ [J], EC [J]).
+    """
+    def mismatch(ec: float) -> float:
+        return transmon_alpha_second_order(ej_from_f01_second_order(f01, ec), ec) - alpha
+
+    e0 = H_PLANCK * abs(alpha)
+    ec = brentq(mismatch, 0.5 * e0, 1.0 * e0, xtol=1e-40, rtol=1e-14)
+    return ej_from_f01_second_order(f01, ec), ec
+
+
+def alpha_scaled_to_design(ej, ec, f_design, ec_design: float, alpha_design: float) -> np.ndarray:
+    """Per-qubit anharmonicity that equals alpha_design for a qubit exactly on design and otherwise follows
+    the series of Eq. 4.11 (Krizan, PhD thesis, Chalmers 2026) in EJ and EC.
+
+    Equation:  alpha_q = alpha_design * a(EJ_q, EC_q) / a(EJ_d, EC_design)
+               a = transmon_alpha_second_order (Eq. 4.11);  EJ_d from f_design at EC_design (inverse of Eq. 4.3)
+
+    Args:
+        ej: per-qubit Josephson energy [J] (array).
+        ec: per-qubit charging energy [J] (array or scalar).
+        f_design: per-qubit design f01 [Hz] (array, same length as ej).
+        ec_design: design charging energy [J].
+        alpha_design: design anharmonicity [Hz], e.g. -330 MHz (Hertzberg et al. 2021, Table 1 caption).
+
+    Returns:
+        alpha [Hz] per qubit.
+    """
+    f_design = np.asarray(f_design, dtype=float)
+    a_d = {f: transmon_alpha_second_order(ej_from_f01_second_order(f, ec_design), ec_design) for f in np.unique(f_design)}
+    ref = np.array([a_d[f] for f in f_design])
+    return alpha_design * transmon_alpha_second_order(ej, ec) / ref
+
+
 def f01_from_rn(rn: float, cq: float, gap: float) -> float:
     """Predict transmon f01 from room-temperature junction resistance.
 
@@ -139,6 +262,29 @@ def f01_from_rn(rn: float, cq: float, gap: float) -> float:
     ej = josephson_energy(critical_current(rn, gap))
     ec = charging_energy(cq)
     return transmon_f01(ej, ec)
+
+
+def f01_from_rn_second_order(rn: float, cq: float, gap: float) -> float:
+    """Predict transmon f01 from junction resistance with the second-order transmon formula.
+
+    Same chain as f01_from_rn (Ambegaokar-Baratoff Ic = pi Delta / (2 e Rn), EJ = Ic Phi0 / 2pi,
+    EC = e^2 / 2Cq), but
+        h f01 = sqrt(8 EJ EC) - EC * (1 + xi/4 + 21 xi^2 / 128),   xi = sqrt(2 EC / EJ)
+    (Krizan, PhD thesis, Chalmers (2026), Eq. 4.3) instead of Eq. 1 of Mayer, Weber et al.,
+    arXiv:2505.08424. Use f01_from_rn only to reproduce that paper.
+
+    Note: Rn here is whatever resistance the gap was calibrated against. With a fitted effective
+    Tc and room-temperature Rn, the fitted Tc also absorbs the RT -> cryogenic resistance change.
+
+    Args:
+        rn: junction resistance [ohm] (scalar or array).
+        cq: qubit capacitance [F] (scalar or array).
+        gap: superconducting gap Delta [J].
+
+    Returns:
+        f01 [Hz].
+    """
+    return transmon_f01_second_order(josephson_energy(critical_current(rn, gap)), charging_energy(cq))
 
 
 def transmon_levels(ej: float, ec: float, ng: float = 0.25, ncut: int = 30) -> np.ndarray:
@@ -223,16 +369,18 @@ def f01_ec_sensitivity(f01: float, ec: float) -> float:
     return (f01 - ec / H_PLANCK) / (2.0 * f01)
 
 
-def rn_target_for_f01(f01: float, cq: float, gap: float) -> float:
-    """Junction resistance needed to hit a target f01 (numerical inverse of f01_from_rn).
+def rn_target_for_f01(f01: float, cq: float, gap: float, model=f01_from_rn) -> float:
+    """Junction resistance needed to hit a target f01 (numerical inverse of an Rn -> f01 model).
 
-    Solves  f01_from_rn(Rn, Cq, Delta) - f01 = 0  for Rn with Brent's method.
-    f01_from_rn decreases monotonically in Rn, so the root is unique.
+    Solves  model(Rn, Cq, Delta) - f01 = 0  for Rn with Brent's method.
+    Both models decrease monotonically in Rn, so the root is unique.
 
     Args:
         f01: target transition frequency [Hz].
         cq: qubit capacitance [F].
         gap: superconducting gap Delta [J].
+        model: f01_from_rn (Eq. 1 of arXiv:2505.08424, default, reproduces the paper) or
+            f01_from_rn_second_order (Krizan thesis Eq. 4.3, used for our own synthetic chips).
 
     Returns:
         Rn [ohm].
@@ -242,7 +390,7 @@ def rn_target_for_f01(f01: float, cq: float, gap: float) -> float:
     """
     # Search bracket [10 ohm, 10 Mohm] spans every practical junction; it is a
     # numerical choice, not a physical constant.
-    return brentq(lambda rn: f01_from_rn(rn, cq, gap) - f01, 1e1, 1e7, xtol=1e-9, rtol=1e-12)
+    return brentq(lambda rn: model(rn, cq, gap) - f01, 1e1, 1e7, xtol=1e-9, rtol=1e-12)
 
 
 def f01_from_rn_exact(rn: float, cq: float, gap: float) -> float:

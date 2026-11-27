@@ -12,7 +12,7 @@ collision-free chips, and how accurate must the prediction be for that to help?*
 ![Capture curve](docs/capture_curve.png)
 
 *Cool dies in ranked order: what fraction of the truly collision-free dies have you found? One synthetic wafer
-(360 uncooled dies, 13 collision-free) in the reference scenario: ~2% Rn spread, 14.5 MHz per-qubit prediction residual,
+(360 uncooled dies, 14 collision-free) in the reference scenario: ~2% Rn spread, 14.5 MHz per-qubit prediction residual,
 no capacitor scatter. With capacitor scatter added the curves move much closer to random (see below). Notebook 04.*
 
 ## Key results (simulation, synthetic data)
@@ -23,37 +23,37 @@ room-temperature data cannot explain. None of this is validated on real fab data
 
 **Reference scenario** (14.5 MHz residual, IBM's measured value; no separate capacitor scatter, no ageing):
 
-- **~27 vs ~128 cooldowns to find 5 collision-free chips** (ours vs random; naive ordering by |Rn − target|: ~73),
+- **~25 vs ~129 cooldowns to find 5 collision-free chips** (ours vs random; naive ordering by |Rn − target|: ~68),
   for an untrimmed wafer with ~2% Rn spread. Only ~4% of dies are collision-free here.
 - **After trimming to 0.5% Rn spread, ranking barely helps**: ~49% of dies are collision-free at a 14.5 MHz residual,
-  but the ranking gain is only 0.08 (0 = random, 1 = perfect). It needs a residual of ≲ 5–10 MHz (gain 0.44 at 5 MHz,
-  0.17 at 10 MHz). Trimming removes the within-die variation that ranking relies on.
+  but the ranking gain is only 0.08 (0 = random, 1 = perfect). It needs a residual of ≲ 5–10 MHz (gain 0.43 at 5 MHz,
+  0.16 at 10 MHz). Trimming removes the within-die variation that ranking relies on.
 
 **Realism sweep** (adds what a resistance probe cannot see: Osman et al.'s 0.8% capacitor (E_C) scatter, ~19 MHz per qubit;
 4% shared Rn ageing between probe and cooldown; 0–1% per-junction ageing, an assumed value). Adding Osman's scatter on top of
 IBM's measured residual is a pessimistic scenario, not a correction to IBM:
 
-- **Untrimmed, the advantage shrinks from ~5× to ~1.5–3×, and collision-free dies become rare (~1–2%).**
-  If half of the capacitor scatter is shared by the die: ~94 vs ~193 cooldowns to 5 good chips (1 of 10 wafers had fewer
-  than 5), ~39 vs ~126 to 3. If all of it is per-qubit: ~139 vs ~203 to 3 good chips (1 of 10 wafers had fewer
-  than 3); 6 of 10 wafers had fewer than 5.
+- **Untrimmed, the advantage shrinks from ~5× to ~2–3×, and collision-free dies become rare (~1–2%).**
+  If half of the capacitor scatter is shared by the die: ~114 vs ~215 cooldowns to 5 good chips (all 10 wafers had at
+  least 5), ~40 vs ~129 to 3. If all of it is per-qubit: ~96 vs ~178 to 3 good chips (1 of 10 wafers had fewer
+  than 3); 4 of 10 wafers had fewer than 5.
   Osman et al. do not report how their 0.8% splits between dies, so these bracket the answer.
-- **Trimmed, ranking gives nothing** (gain 0.01–0.09 in every realism run).
-- **Ageing shared by the whole wafer does not hurt the ranking** once a few cooled dies recalibrate T_c (gain 0.38 without
-  vs 0.40 with 4% drift). Per-junction ageing (assumed values, none published) acts like extra residual: at 1% of Rn it
+- **Trimmed, ranking gives nothing** (gain −0.09 to 0.09 in every realism run).
+- **Ageing shared by the whole wafer does not hurt the ranking** once a few cooled dies recalibrate T_c (gain 0.44 without
+  vs 0.48 with 4% drift). Per-junction ageing (assumed values, none published) acts like extra residual: at 1% of Rn it
   adds ~27 MHz per qubit.
 
 **Physics behind both:**
 
 - **Only within-die, per-qubit error matters for picking dies.** A frequency offset shared by the whole die cannot cause a
   collision; a shared change in Rn or T_c barely can (it squeezes all gaps by about half the fractional change, against a
-  fixed anharmonicity). A shift in effective T_c from 0.71 to 0.68 K biases absolute predictions by +115 MHz but leaves the
-  ranking unchanged (gain 0.61 vs 0.62). Recalibrating on 3 cooled dies removes the bias (−0.5 ± 1.7 MHz).
+  fixed anharmonicity). A shift in effective T_c from 0.71 to 0.68 K biases absolute predictions by +116 MHz but leaves the
+  ranking unchanged (gain 0.61 vs 0.60). Recalibrating on 3 cooled dies removes the bias (−0.5 ± 1.7 MHz).
 - **A 1.6% residual (~81 MHz), if entirely per-qubit, leaves no collision-free heavy-hex chips at all** (both Rn
   presets). What matters is how much of the error is shared by the whole die. With 10 cooled dies the calibration
   recovers that split (10.6 / 11.0 MHz estimated vs 10.3 / 10.3 MHz true).
 - **Calibration is cheap**: effective T_c is fitted to ±0.0007 K from 2 cooled dies, and the ranking gain is flat
-  (0.60–0.64) from 2 to 20 calibration dies.
+  (0.61–0.64) from 2 to 20 calibration dies.
 
 ## Real-data check: test arrays vs qubits (notebook 05)
 
@@ -132,7 +132,16 @@ room-temperature → frequency model. It is not a model of any one fab's chip.
 - **Small numbers of good dies.** In the realism sweep many wafers have only 2–8 collision-free dies, so the ranking gain
   scatters by ±0.1–0.3 between wafers; cooldowns-to-5 is undefined on wafers with fewer than 5 good dies (counted, not dropped).
 - **No trimming model.** "Trimmed" means a narrower Rn spread (0.5%); the trimming process itself is not simulated.
-- **Simple models**: Eq. 1 with a single fitted T_c; Gaussian residuals; Table 1 collision windows taken as hard cut-offs.
+- **Simple models**: Ambegaokar–Baratoff plus the second-order transmon formula (Križan, PhD thesis, Chalmers 2026, Eq. 4.3;
+  Eq. 1 of Mayer, Weber et al. is kept only to reproduce their paper) with one fitted effective T_c; Gaussian residuals;
+  Table 1 collision windows taken as hard cut-offs.
+- **The fitted T_c is effective and already contains the cold/warm resistance change.** A qubit's E_J is set by its junction
+  resistance at millikelvin, which is higher than the room-temperature value by a process-dependent factor k (k = 1.1375 for
+  Chalmers Al/AlOx junctions, Križan 2026 thesis p. 49, "not to be considered universal"). Since E_J ∝ T_c / (k·R_RT),
+  room-temperature data cannot tell T_c and k apart: the fitted value is T_c/k, together with any area or series-resistance
+  error. k depends on junction and process, so this scale has to be fitted per design (one design in notebooks 01–04;
+  per-design offsets in notebook 05), not copied from another lab. (Our reading, not a claim of either paper: Fraunhofer's
+  fitted 0.71 K is 1.7× below bulk Al's 1.2 K, more than k ≈ 1.14 alone would explain.)
 
 ## How to run
 
