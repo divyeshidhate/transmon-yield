@@ -171,7 +171,7 @@ def transmon_f01_f12_exact(ej: float, ec: float) -> tuple[float, float]:
     return (e[1] - e[0]) / H_PLANCK, (e[2] - e[1]) / H_PLANCK
 
 
-def cq_for_anharmonicity(f01: float, alpha: float) -> float:
+def cq_for_anharmonicity(f01: float, alpha: float, cq_bounds_f: tuple[float, float] = (20e-15, 300e-15)) -> float:
     """Capacitance that gives a target anharmonicity at a target f01 (exact diagonalisation).
 
     Solves, for Cq:  alpha_exact(EJ*, EC(Cq)) = alpha,  where EJ* makes f01_exact = f01,
@@ -183,6 +183,9 @@ def cq_for_anharmonicity(f01: float, alpha: float) -> float:
     Args:
         f01: target 0-1 frequency [Hz].
         alpha: target anharmonicity f12 - f01 [Hz] (negative).
+        cq_bounds_f: search bracket for Cq [F]. alpha(Cq) is monotonic only in the transmon regime;
+            for low f01 the default lower bound reaches the charge regime, so callers may pass a
+            bracket around the alpha ~ -EC guess (e.g. yieldkit.imec.qubit_cq).
 
     Returns:
         Cq [F].
@@ -196,7 +199,7 @@ def cq_for_anharmonicity(f01: float, alpha: float) -> float:
         f01_x, f12_x = transmon_f01_f12_exact(ej_for_f01(ec), ec)
         return (f12_x - f01_x) - alpha
 
-    return brentq(alpha_minus_target, 20e-15, 300e-15, xtol=1e-20)
+    return brentq(alpha_minus_target, cq_bounds_f[0], cq_bounds_f[1], xtol=1e-20)
 
 
 def f01_ec_sensitivity(f01: float, ec: float) -> float:
@@ -240,3 +243,27 @@ def rn_target_for_f01(f01: float, cq: float, gap: float) -> float:
     # Search bracket [10 ohm, 10 Mohm] spans every practical junction; it is a
     # numerical choice, not a physical constant.
     return brentq(lambda rn: f01_from_rn(rn, cq, gap) - f01, 1e1, 1e7, xtol=1e-9, rtol=1e-12)
+
+
+def f01_from_rn_exact(rn: float, cq: float, gap: float) -> float:
+    """Predict transmon f01 from room-temperature resistance, exact transmon spectrum.
+
+    Same chain as f01_from_rn (Ambegaokar-Baratoff Ic = pi Delta / (2 e Rn), EJ = Ic Phi0 / 2pi,
+    EC = e^2 / 2Cq), but f01 = (E1 - E0)/h from charge-basis diagonalisation (Koch et al.,
+    Phys. Rev. A 76, 042319 (2007)) instead of the asymptotic formula of Eq. 1 in
+    Mayer, Weber et al., arXiv:2505.08424. The asymptotic formula is ~13 MHz high at
+    EJ/EC ~ 53 (see tests).
+
+    Args:
+        rn: junction resistance [ohm] (scalar or array).
+        cq: qubit capacitance [F] (scalar or array, broadcast with rn).
+        gap: superconducting gap Delta [J].
+
+    Returns:
+        f01 [Hz], same shape as the broadcast inputs.
+    """
+    rn_b, cq_b = np.broadcast_arrays(np.asarray(rn, dtype=float), np.asarray(cq, dtype=float))
+    ej = josephson_energy(critical_current(rn_b, gap))
+    ec = charging_energy(cq_b)
+    out = np.array([transmon_f01_f12_exact(a, b)[0] for a, b in zip(ej.ravel(), ec.ravel())])
+    return out.reshape(rn_b.shape) if rn_b.ndim else float(out[0])

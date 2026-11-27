@@ -27,3 +27,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+# Tests that download public data (Zenodo) are deselected by default, so CI never depends on Zenodo.
+# Run them locally with:  python -m pytest -m network
+addopts = "-m 'not network'"
+markers = ["network: downloads public data from Zenodo (deselected by default; run with -m network)"]

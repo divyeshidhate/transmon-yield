@@ -1,4 +1,4 @@
-"""Run the test suite and execute all four notebooks top to bottom.
+"""Run the test suite and execute all five notebooks top to bottom.
 
 Usage (from a fresh clone):
     pip install -e ".[all]"
@@ -26,6 +26,7 @@ NOTEBOOKS = [
     "02_synthetic_wafer.ipynb",
     "03_collision_yield.ipynb",
     "04_die_ranking.ipynb",
+    "05_imec_test_arrays.ipynb",
 ]
 KERNEL = "yieldkit-run"
 
