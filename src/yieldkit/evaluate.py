@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from yieldkit.collisions import count_collisions, directed_edges, spectator_triples
+from yieldkit.collisions import ALPHA_HZ, count_collisions, directed_edges, spectator_triples
 from yieldkit.ranking import (
     DIE,
     calibrate,
@@ -21,13 +21,31 @@ from yieldkit.ranking import (
 from yieldkit.scenario import Scenario
 
 
-def true_collision_free(truth: pd.DataFrame, design_hz: np.ndarray, edges: np.ndarray) -> pd.Series:
-    """Is each die truly collision-free? (Table 1 of Hertzberg et al. 2021 on f01_true.)"""
+def true_alpha_hz(truth: pd.DataFrame, cq_design_f: float) -> np.ndarray:
+    """Per-qubit true anharmonicity [Hz] (APPROXIMATION).
+
+    Equation: alpha_q = alpha_design * EC_q / EC_design = alpha_design * Cq_design / Cq_q,
+    with alpha_design = -330 MHz (Hertzberg et al. 2021, Table 1 caption). Uses |alpha| ~ EC
+    (Koch et al. 2007), i.e. alpha scales with EC at fixed EJ/EC; it ignores the weak EJ/EC
+    dependence of alpha. With no capacitor scatter, alpha_q = alpha_design exactly.
+    """
+    return ALPHA_HZ * cq_design_f / truth["cq_true_f"].to_numpy()
+
+
+def true_collision_free(
+    truth: pd.DataFrame, design_hz: np.ndarray, edges: np.ndarray, cq_design_f: float | None = None
+) -> pd.Series:
+    """Is each die truly collision-free? (Table 1 of Hertzberg et al. 2021 on f01_true.)
+
+    If cq_design_f is given, each qubit's anharmonicity follows its own true EC
+    (true_alpha_hz); otherwise the design alpha = -330 MHz is used for every qubit.
+    """
     n_q = len(design_hz)
     t = truth.sort_values(DIE + ["qubit_id"])
     f = t["f01_true_hz"].to_numpy().reshape(-1, n_q)
+    alpha = ALPHA_HZ if cq_design_f is None else true_alpha_hz(t, cq_design_f).reshape(-1, n_q)
     directed = directed_edges(edges, design_hz)
-    total = sum(count_collisions(f, directed, spectator_triples(directed, n_q)).values())
+    total = sum(count_collisions(f, directed, spectator_triples(directed, n_q), alpha).values())
     idx = pd.MultiIndex.from_frame(t[DIE].drop_duplicates())
     return pd.Series(total == 0, index=idx, name="collision_free")
 
@@ -85,7 +103,7 @@ def evaluate_wafer(
     """
     cal = calibration if calibration is not None else calibrate(observed, sc.cq_f)
     scores = score_dies(observed, cal, sc.design_hz, sc.lattice.edges, n_samples, seed)
-    good = true_collision_free(truth, sc.design_hz, sc.lattice.edges)
+    good = true_collision_free(truth, sc.design_hz, sc.lattice.edges, cq_design_f=sc.cq_f)
     ours = order_ours(scores)
     naive = order_naive(naive_scores(observed, sc.rn_target_ohm))
     pool = good.loc[ours]

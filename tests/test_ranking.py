@@ -139,3 +139,139 @@ def test_ranking_module_never_names_truth():
         elif isinstance(n, (ast.Import, ast.ImportFrom)):
             names += [a.name for a in n.names] + [getattr(n, "module", "") or ""]
     assert not [s for s in names if "true" in s.lower() or "truth" in s.lower() or "evaluate" in s.lower()]
+
+
+# ---------------- Step 6a: capacitor (EC) scatter hidden from the RT observation ----------------
+
+from yieldkit.evaluate import true_alpha_hz  # noqa: E402
+from yieldkit.physics import f01_ec_sensitivity  # noqa: E402
+from yieldkit.scenario import EC_RSD_OSMAN  # noqa: E402
+
+
+def test_ec_sensitivity_matches_numerical_derivative():
+    """d ln f / d ln EC of the transmon formula (Koch et al. 2007): analytic vs finite difference."""
+    from yieldkit.physics import transmon_f01
+
+    ec = charging_energy(SC.cq_f)
+    f = 5.07e9
+    ej = ((f * H_PLANCK + ec) ** 2) / (8 * ec)  # invert f = (sqrt(8 EJ EC) - EC)/h
+    h = 1e-6
+    num = (np.log(transmon_f01(ej, ec * (1 + h))) - np.log(transmon_f01(ej, ec * (1 - h)))) / (2 * h)
+    assert f01_ec_sensitivity(f, ec) == pytest.approx(num, rel=1e-6)
+    assert f01_ec_sensitivity(f, ec) == pytest.approx(0.472, abs=0.001)
+
+
+def _expected_ec_extra_hz() -> float:
+    """RMS over the 23 qubits of EC_rsd * sensitivity * f (each qubit at its own set-point)."""
+    ec = charging_energy(SC.cq_f)
+    per_q = EC_RSD_OSMAN * np.array([f01_ec_sensitivity(f, ec) for f in SC.design_hz]) * SC.design_hz
+    return float(np.sqrt(np.mean(per_q**2)))
+
+
+def test_ec_scatter_grows_residual_by_expected_amount():
+    """Deterministic: seed 11, 100 cooled dies (2300 qubits), IBM 14.5 MHz other-residual.
+
+    Osman et al. 2023's 0.8% EC scatter should add sqrt(sigma_other^2 + ~19.2^2) in quadrature.
+    Tolerances (our choice): extra residual within 7%, total within 3%.
+    """
+    expected_extra = _expected_ec_extra_hz()
+    assert expected_extra == pytest.approx(19.2e6, abs=0.1e6)
+    base = wafer_config(SC, RN_RSD_AS_FAB, RESID_IBM_HZ, n_cooled_dies=100)
+    c0 = calibrate(make_wafer(base, seed=11)[0], SC.cq_f)
+    with_ec = wafer_config(SC, RN_RSD_AS_FAB, RESID_IBM_HZ, n_cooled_dies=100, ec_rsd=EC_RSD_OSMAN)
+    c1 = calibrate(make_wafer(with_ec, seed=11)[0], SC.cq_f)
+    extra = np.sqrt(c1.sigma_qubit_hz**2 - c0.sigma_qubit_hz**2)
+    assert extra == pytest.approx(expected_extra, rel=0.07)
+    assert c1.sigma_qubit_hz == pytest.approx(np.hypot(c0.sigma_qubit_hz, expected_extra), rel=0.03)
+
+
+def test_ec_die_split_moves_variance_to_die_part():
+    """With half the EC variance die-shared, calibration sees ~half of it per qubit and ~half per die."""
+    cfg = wafer_config(SC, RN_RSD_AS_FAB, 0.0, n_cooled_dies=100, ec_rsd=EC_RSD_OSMAN, ec_die_frac=0.5)
+    cal = calibrate(make_wafer(cfg, seed=11)[0], SC.cq_f)
+    half = _expected_ec_extra_hz() / np.sqrt(2)
+    assert cal.sigma_die_hz == pytest.approx(half, rel=0.25)
+    assert cal.sigma_qubit_hz < 0.8 * _expected_ec_extra_hz()
+
+
+def test_true_alpha_follows_ec_and_defaults_are_unchanged():
+    obs, truth = make_wafer(wafer_config(SC, RN_RSD_AS_FAB, 0.0, ec_rsd=EC_RSD_OSMAN), seed=12)
+    alpha = true_alpha_hz(truth, SC.cq_f)
+    assert np.std(alpha) / abs(np.mean(alpha)) == pytest.approx(EC_RSD_OSMAN, rel=0.1)
+    # Without capacitor scatter the per-qubit alpha is exactly the design value, so Step 4 is unchanged.
+    obs0, truth0 = make_wafer(wafer_config(SC, RN_RSD_AS_FAB, RESID_IBM_HZ), seed=12)
+    assert np.all(true_alpha_hz(truth0, SC.cq_f) == ALPHA_HZ)
+    a = true_collision_free(truth0, SC.design_hz, SC.lattice.edges)
+    b = true_collision_free(truth0, SC.design_hz, SC.lattice.edges, cq_design_f=SC.cq_f)
+    assert a.equals(b)
+
+
+# ---------------- Step 6b: junction ageing between RT probe and cooldown ----------------
+
+from yieldkit.ranking import predict_f01  # noqa: E402
+
+
+def _f_matrix(truth: pd.DataFrame, col: str = "f01_true_hz") -> np.ndarray:
+    return truth.sort_values(["wafer_id", "die_id", "qubit_id"])[col].to_numpy().reshape(-1, SC.lattice.n_qubits)
+
+
+def _counts(f: np.ndarray) -> np.ndarray:
+    from yieldkit.collisions import count_collisions, directed_edges, spectator_triples
+
+    d = directed_edges(SC.lattice.edges, SC.design_hz)
+    return sum(count_collisions(f, d, spectator_triples(d, SC.lattice.n_qubits)).values())
+
+
+def test_additive_common_offset_leaves_collisions_identical():
+    """Table 1 conditions compare frequencies on one chip with a fixed alpha, so adding the SAME
+    offset to every qubit of a die cannot change any collision count (exact)."""
+    _, truth = make_wafer(wafer_config(SC, RN_RSD_AS_FAB, RESID_IBM_HZ), seed=0)
+    f = _f_matrix(truth)
+    offsets = np.random.default_rng(0).normal(0, 100e6, (f.shape[0], 1))
+    assert np.array_equal(_counts(f), _counts(f + offsets))
+
+
+def test_shared_drift_compresses_gaps_and_biases_absolute_prediction():
+    """A shared Rn increase d is NOT a pure common offset: f + EC/h scales as (1+d)^(-1/2), so the
+    gaps between qubits shrink by that factor while alpha (set by EC) does not. Expected:
+    (i) RT-explained gaps scale exactly by (1+d)^(-1/2); (ii) with a calibration from an un-aged
+    wafer, prediction is biased by ~(f + EC/h) d / 2; (iii) recalibrating absorbs it exactly
+    (Tc -> Tc/(1+d)), because Rn and Tc enter Eq. 1 only as Tc/Rn."""
+    d = 0.04  # Osman et al. 2023: +4% over 21 days
+    o0, t0 = make_wafer(wafer_config(SC, RN_RSD_AS_FAB, RESID_IBM_HZ), seed=0)
+    o1, t1 = make_wafer(wafer_config(SC, RN_RSD_AS_FAB, RESID_IBM_HZ, drift_shared_rel=d), seed=0)
+    resid = _f_matrix(t0, "f01_resid_qubit_hz") + _f_matrix(t0, "f01_resid_die_hz")
+    F0, F1 = _f_matrix(t0) - resid, _f_matrix(t1) - resid  # RT-explained part
+    e = SC.lattice.edges
+    assert np.allclose(F1[:, e[:, 0]] - F1[:, e[:, 1]], (F0[:, e[:, 0]] - F0[:, e[:, 1]]) * (1 + d) ** -0.5, rtol=1e-9)
+
+    cal0, cal1 = calibrate(o0, SC.cq_f), calibrate(o1, SC.cq_f)
+    unc = ~o1["is_cooled"].to_numpy()
+    true_f = t1["f01_true_hz"].to_numpy()[unc]
+    ec_hz = charging_energy(SC.cq_f) / H_PLANCK
+    expected_bias = np.mean((SC.design_hz + ec_hz) / 2) * d
+    assert np.mean(predict_f01(o1[unc], cal0) - true_f) == pytest.approx(expected_bias, rel=0.05)
+    assert cal1.tc_k == pytest.approx(cal0.tc_k / (1 + d), rel=1e-3)
+    assert abs(np.mean(predict_f01(o1[unc], cal1) - true_f)) < 2e6
+
+
+def test_junction_drift_adds_residual_in_quadrature():
+    """Per-junction drift s (ASSUMED value) shifts f by (f + EC/h)/2 * s per qubit (d f / d ln Rn).
+    Deterministic: seed 11, 100 cooled dies; tolerance 7% (our choice)."""
+    s = 0.01
+    ec_hz = charging_energy(SC.cq_f) / H_PLANCK
+    expected = s * np.sqrt(np.mean(((SC.design_hz + ec_hz) / 2) ** 2))
+    c0 = calibrate(make_wafer(wafer_config(SC, RN_RSD_AS_FAB, RESID_IBM_HZ, n_cooled_dies=100), seed=11)[0], SC.cq_f)
+    cfg = wafer_config(SC, RN_RSD_AS_FAB, RESID_IBM_HZ, n_cooled_dies=100, drift_junction_rsd=s)
+    c1 = calibrate(make_wafer(cfg, seed=11)[0], SC.cq_f)
+    assert np.sqrt(c1.sigma_qubit_hz**2 - c0.sigma_qubit_hz**2) == pytest.approx(expected, rel=0.07)
+
+
+def test_defaults_reproduce_step4_headline():
+    """No EC scatter, no ageing: notebook 04 headline (seed 0) is unchanged: gain 0.61, 24 vs ~129 cooldowns."""
+    obs, truth = make_wafer(wafer_config(SC, RN_RSD_AS_FAB, RESID_IBM_HZ), seed=0)
+    r = evaluate_wafer(obs, truth, SC, seed=0)
+    assert r["n_good"] == 13
+    assert r["gain_ours"] == pytest.approx(0.613, abs=0.001)
+    assert r["cool_ours"] == 24
+    assert r["cool_random"] == pytest.approx(128.93, abs=0.01)

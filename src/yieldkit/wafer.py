@@ -62,6 +62,9 @@ class WaferConfig:
     tc_eff_true_k: tuple[float, ...] = (0.71,)  # per wafer; 0.71 K fitted by Lang et al. 2025, Sec. IV.2
     cq_design_f: float = 86e-15  # design capacitance, arXiv:2505.08424, Sec. III.1
     cq_rsd: float = 0.02  # ASSUMPTION: capacitance spread (paper: Cq deviations contribute, no number given)
+    # Share of the Cq variance that is common to all qubits on a die (0 = fully per-qubit).
+    # The analyst never sees Cq; EC = e^2/(2 Cq), so this is also the EC scatter split.
+    cq_die_frac: float = 0.0
     f01_residual_rsd: float = F01_RESIDUAL_RSD_TUNED  # TUNED to 1.6% (see constant above)
     ageing_shift_rel: float = 0.0  # ASSUMPTION: optional systematic shift of cryo f01 (none published)
 
@@ -73,6 +76,18 @@ class WaferConfig:
     # Split into a per-qubit part (drives collisions) and a die-shared part (absolute error only).
     f01_resid_qubit_hz: float = 0.0
     f01_resid_die_hz: float = 0.0
+
+    # --- Step 6b: junction ageing between RT probing and cooldown (defaults 0 = no ageing) ---
+    # Shared drift: ONE fractional Rn increase applied to every junction (no time model; it is
+    # the total drift between probe and cooldown). Published ranges: Stehli et al., APL 117,
+    # 124005 (2020): +1.6% mean over 6 months (ambient); Osman et al., PRR 5, 043001 (2023),
+    # Fig. 1(h): +4% over 21 days, slowing, with the wafer spread unchanged (Fig. 1(i));
+    # Kreikebaum et al., SST 33, 06LT02 (2020), supplement S2: ~5.5% saturating with a
+    # 132 +/- 37 h (~5.5 day) time constant.
+    rn_drift_shared_rel: float = 0.0
+    # Per-junction drift: ASSUMED -- no published per-junction value; Osman et al. 2023 only
+    # show that the wafer spread did not change. Relative std of an independent extra Rn change.
+    rn_drift_junction_rsd: float = 0.0
 
     # --- what gets cooled ---
     n_cooled_dies_per_wafer: int = 10  # 10 chips x 4 = 40 qubits, as in Lang et al. / Mayer et al.
@@ -173,9 +188,18 @@ def make_wafer(cfg: WaferConfig, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]
             ln_med = ln_median
         rn_true = np.exp(ln_med + trend + offset + noise)
         rn_measured = rn_true * (1 + rng.normal(0.0, cfg.rn_probe_noise_rsd, rn_true.size))
-        cq_true = cfg.cq_design_f * (1 + rng.normal(0.0, cfg.cq_rsd, rn_true.size))
+        # Capacitor scatter, hidden from the RT observation: per-qubit part (+ optional die-shared part).
+        cq_rel = rng.normal(0.0, cfg.cq_rsd * np.sqrt(1.0 - cfg.cq_die_frac), rn_true.size)
+        if cfg.cq_die_frac > 0:  # drawn only when used, so the default random sequence is unchanged
+            cq_rel = cq_rel + np.repeat(rng.normal(0.0, cfg.cq_rsd * np.sqrt(cfg.cq_die_frac), n_die), n_q)
+        cq_true = cfg.cq_design_f * (1 + cq_rel)
         tc = cfg.tc_for_wafer(w)
-        f01_true = f01_from_rn(rn_true, cq_true, gap_from_tc(tc))
+        # Ageing: the junction keeps changing after the RT probe; the cryo frequency follows the
+        # Rn at cooldown, the observation keeps the Rn at probe time.
+        rn_cool = rn_true * (1.0 + cfg.rn_drift_shared_rel)
+        if cfg.rn_drift_junction_rsd > 0:  # drawn only when used: default random sequence unchanged
+            rn_cool = rn_cool * (1.0 + rng.normal(0.0, cfg.rn_drift_junction_rsd, rn_true.size))
+        f01_true = f01_from_rn(rn_cool, cq_true, gap_from_tc(tc))
         resid_die = np.zeros(rn_true.size)
         resid_qubit = np.zeros(rn_true.size)
         if cfg.f01_resid_die_hz > 0:
@@ -212,6 +236,7 @@ def make_wafer(cfg: WaferConfig, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]
                     "die_id": die_id,
                     "qubit_id": qubit_id,
                     "rn_true_ohm": rn_true,
+                    "rn_cooldown_ohm": rn_cool,
                     "ln_rn_trend": trend,
                     "ln_rn_die_offset": offset,
                     "ln_rn_junction_noise": noise,

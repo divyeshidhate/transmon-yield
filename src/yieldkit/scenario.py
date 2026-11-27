@@ -39,6 +39,12 @@ arXiv:2608.27789, abstract / Table II (14 wafers, 150 mm)."""
 
 RESID_IBM_HZ = 14.5e6
 """Hertzberg et al. 2021: 14.5 MHz (0.25%) scatter of f01 about their f(Rn) fit (31 qubits)."""
+EC_RSD_OSMAN = 0.008
+"""Charging-energy scatter sigma_EC/EC = 0.8% (1.7 MHz on 195 MHz): Osman et al., Phys. Rev.
+Research 5, 043001 (2023), Sec. III / Fig. 2(b), 32 qubits excluding 3 outliers. Measured across
+4 dies (5 x 7 mm each), so it includes some die-to-die spread: treating all of it as per-qubit
+(ec_die_frac = 0) is an upper bound for the collision-relevant part. The paper gives no split."""
+
 RESID_FRAUNHOFER_REL = 0.016
 """Mayer, Weber et al. 2025 (arXiv:2505.08424), Sec. III.1: 1.6% average deviation, 40 qubits."""
 
@@ -71,12 +77,23 @@ def wafer_config(
     tc_true_k: tuple[float, ...] = (TC_NOMINAL_K,),
     n_cooled_dies: int = 10,
     probe_noise_rsd: float = RN_PROBE_NOISE_RSD,
+    ec_rsd: float = 0.0,
+    ec_die_frac: float = 0.0,
+    drift_shared_rel: float = 0.0,
+    drift_junction_rsd: float = 0.0,
 ) -> WaferConfig:
     """WaferConfig for the Step 4 scenario (Step 2 geometry and spatial model reused).
 
-    Cq spread is folded into the residual (Mayer et al. 2025 footnote 2: the 1.6% includes
-    deviations from the design capacity), so cq_rsd = 0. The cryo measurement noise is
-    Hertzberg's < 100 kHz.
+    resid_qubit_hz / resid_die_hz: frequency deviation RT data cannot explain, EXCLUDING the
+    capacitor. ec_rsd: relative EC (= Cq) scatter, hidden from the RT observation, added on
+    top (default 0 reproduces Step 4; Osman et al. 2023 measured 0.8%, see EC_RSD_OSMAN).
+    It shifts f01 by (f - EC)/(2 f) * dEC/EC (physics.f01_ec_sensitivity), about 19 MHz per
+    qubit at 0.8% and 5.07 GHz. Combining a measured lab residual (e.g. IBM's 14.5 MHz, which
+    already contains that lab's EC scatter) with Osman's EC scatter is therefore a pessimistic
+    scenario, not a correction. ec_die_frac: share of the EC variance common to the die.
+    drift_shared_rel / drift_junction_rsd: Rn ageing between probe and cooldown (see
+    WaferConfig.rn_drift_shared_rel / rn_drift_junction_rsd; the per-junction value is ASSUMED).
+    The cryo measurement noise is Hertzberg's < 100 kHz.
     """
     return replace(
         WaferConfig(),
@@ -85,7 +102,10 @@ def wafer_config(
         rn_rsd=rn_rsd,
         rn_probe_noise_rsd=probe_noise_rsd,
         cq_design_f=sc.cq_f,
-        cq_rsd=0.0,
+        cq_rsd=ec_rsd,
+        cq_die_frac=ec_die_frac,
+        rn_drift_shared_rel=drift_shared_rel,
+        rn_drift_junction_rsd=drift_junction_rsd,
         f01_residual_rsd=CRYO_NOISE_HZ / (F1_HZ + STEP_HZ),
         f01_resid_qubit_hz=resid_qubit_hz,
         f01_resid_die_hz=resid_die_hz,

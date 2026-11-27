@@ -199,6 +199,27 @@ def cq_for_anharmonicity(f01: float, alpha: float) -> float:
     return brentq(alpha_minus_target, 20e-15, 300e-15, xtol=1e-20)
 
 
+def f01_ec_sensitivity(f01: float, ec: float) -> float:
+    """Relative sensitivity of f01 to the charging energy at fixed EJ.
+
+    Equation: from f01 = (sqrt(8 EJ EC) - EC)/h,
+        d ln f01 / d ln EC = (f01 - EC/h) / (2 f01)
+    so a relative EC scatter s_EC shifts f01 by  s_EC * (f01 - EC/h) / 2  [Hz].
+
+    Args:
+        f01: transition frequency [Hz].
+        ec: charging energy [J].
+
+    Returns:
+        Dimensionless sensitivity (about 0.47 at 5.07 GHz with EC/h = 284 MHz).
+
+    Source: derivative of the asymptotic transmon formula, Koch et al., Phys. Rev. A 76,
+    042319 (2007); used to translate the 0.8% EC scatter of Osman et al., Phys. Rev.
+    Research 5, 043001 (2023) into a frequency scatter.
+    """
+    return (f01 - ec / H_PLANCK) / (2.0 * f01)
+
+
 def rn_target_for_f01(f01: float, cq: float, gap: float) -> float:
     """Junction resistance needed to hit a target f01 (numerical inverse of f01_from_rn).
 

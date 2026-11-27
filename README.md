@@ -12,22 +12,43 @@ collision-free chips, and how accurate must the prediction be for that to help?*
 ![Capture curve](docs/capture_curve.png)
 
 *Cool dies in ranked order: what fraction of the truly collision-free dies have you found? One synthetic wafer
-(360 uncooled dies, 13 collision-free) with ~2% Rn spread and a 14.5 MHz per-qubit prediction residual. Notebook 04.*
+(360 uncooled dies, 13 collision-free) in the reference scenario: ~2% Rn spread, 14.5 MHz per-qubit prediction residual,
+no capacitor scatter. With capacitor scatter added the curves move much closer to random (see below). Notebook 04.*
 
 ## Key results (simulation, synthetic data)
 
 All results: heavy-hex d = 3 chip (23 qubits, 5.00 / 5.07 / 5.14 GHz), one chip per 10 × 7 mm die, 370 dies per 200 mm
 wafer, 10 calibration dies, averaged over 10 synthetic wafers. "Residual" = the within-die, per-qubit frequency error that
-room-temperature data cannot explain.
+room-temperature data cannot explain. None of this is validated on real fab data.
+
+**Reference scenario** (14.5 MHz residual, IBM's measured value; no separate capacitor scatter, no ageing):
 
 - **~27 vs ~128 cooldowns to find 5 collision-free chips** (ours vs random; naive ordering by |Rn − target|: ~73),
-  for an untrimmed wafer with ~2% Rn spread and a 14.5 MHz residual. Only ~4% of dies are collision-free here.
+  for an untrimmed wafer with ~2% Rn spread. Only ~4% of dies are collision-free here.
 - **After trimming to 0.5% Rn spread, ranking barely helps**: ~49% of dies are collision-free at a 14.5 MHz residual,
   but the ranking gain is only 0.08 (0 = random, 1 = perfect). It needs a residual of ≲ 5–10 MHz (gain 0.44 at 5 MHz,
   0.17 at 10 MHz). Trimming removes the within-die variation that ranking relies on.
-- **Only within-die, per-qubit error matters for picking dies.** A shift in effective T_c from 0.71 to 0.68 K biases
-  absolute predictions by +115 MHz but leaves the ranking unchanged (gain 0.61 vs 0.62). Recalibrating on 3 cooled
-  dies removes the bias (−0.5 ± 1.7 MHz).
+
+**Realism sweep** (adds what a resistance probe cannot see: Osman et al.'s 0.8% capacitor (E_C) scatter, ~19 MHz per qubit;
+4% shared Rn ageing between probe and cooldown; 0–1% per-junction ageing, an assumed value). Adding Osman's scatter on top of
+IBM's measured residual is a pessimistic scenario, not a correction to IBM:
+
+- **Untrimmed, the advantage shrinks from ~5× to ~1.5–3×, and collision-free dies become rare (~1–2%).**
+  If half of the capacitor scatter is shared by the die: ~94 vs ~193 cooldowns to 5 good chips (1 of 10 wafers had fewer
+  than 5), ~39 vs ~126 to 3. If all of it is per-qubit: ~139 vs ~203 to 3 good chips (1 of 10 wafers had fewer
+  than 3); 6 of 10 wafers had fewer than 5.
+  Osman et al. do not report how their 0.8% splits between dies, so these bracket the answer.
+- **Trimmed, ranking gives nothing** (gain 0.01–0.09 in every realism run).
+- **Ageing shared by the whole wafer does not hurt the ranking** once a few cooled dies recalibrate T_c (gain 0.38 without
+  vs 0.40 with 4% drift). Per-junction ageing (assumed values, none published) acts like extra residual: at 1% of Rn it
+  adds ~27 MHz per qubit.
+
+**Physics behind both:**
+
+- **Only within-die, per-qubit error matters for picking dies.** A frequency offset shared by the whole die cannot cause a
+  collision; a shared change in Rn or T_c barely can (it squeezes all gaps by about half the fractional change, against a
+  fixed anharmonicity). A shift in effective T_c from 0.71 to 0.68 K biases absolute predictions by +115 MHz but leaves the
+  ranking unchanged (gain 0.61 vs 0.62). Recalibrating on 3 cooled dies removes the bias (−0.5 ± 1.7 MHz).
 - **A 1.6% residual (~81 MHz), if entirely per-qubit, leaves no collision-free heavy-hex chips at all** (both Rn
   presets). What matters is how much of the error is shared by the whole die. With 10 cooled dies the calibration
   recovers that split (10.6 / 11.0 MHz estimated vs 10.3 / 10.3 MHz true).
@@ -68,6 +89,10 @@ counting rules and the frequency-step sweep range are not published.
 | Rn spread presets | 2% / 0.5% | Križan et al. 2026 (citing their ref. [9]) / Wang et al. 2026 |
 | Residual presets | 14.5 MHz / 1.6% | Hertzberg et al. 2021 / Mayer, Weber et al. 2025 |
 | Frequency-step sweep (notebook 03) | 30–150 MHz | Our choice (range not published) |
+| Capacitor (E_C) scatter, realism sweep | 0.8% (~19 MHz per qubit) | Osman et al. 2023, Fig. 2(b); measured across 4 dies, split not reported: run fully per-qubit (upper bound) and 50 / 50 |
+| Per-qubit anharmonicity | α_q = −330 MHz × E_C,q / E_C,design | Approximation (truth only; the ranking uses the design α) |
+| Shared Rn ageing, probe → cooldown | 4% | Osman et al. 2023 (+4% in 21 days); Stehli et al. 2020 report +1.6% over 6 months |
+| Per-junction Rn ageing | 0 / 0.25 / 0.5 / 1% | **Assumed: no published per-junction value** |
 
 Combining the papers: the ranking study uses an IBM-style chip and collision rules with Fraunhofer's
 room-temperature → frequency model. It is not a model of any one fab's chip.
@@ -77,6 +102,11 @@ room-temperature → frequency model. It is not a model of any one fab's chip.
 - **Synthetic data only.** Wafers are generated from published statistics; nothing here is validated on real fab data.
 - **Simplified frequency plan.** One fixed 3-frequency pattern; real chips also have resonators, couplers and other constraints.
 - **Results depend on assumptions**, especially the variance split, which sets how much within-die variation the probe can see.
+- **The headline depends on scatter the probe cannot see.** How much of the capacitor scatter is per-qubit (not reported
+  in the source) moves the untrimmed advantage between ~1.5× and ~3×; per-junction ageing has no published value at all.
+- **Small numbers of good dies.** In the realism sweep many wafers have only 2–8 collision-free dies, so the ranking gain
+  scatters by ±0.1–0.3 between wafers; cooldowns-to-5 is undefined on wafers with fewer than 5 good dies (counted, not dropped).
+- **No trimming model.** "Trimmed" means a narrower Rn spread (0.5%); the trimming process itself is not simulated.
 - **Simple models**: Eq. 1 with a single fitted T_c; Gaussian residuals; Table 1 collision windows taken as hard cut-offs.
 
 ## How to run
@@ -100,7 +130,7 @@ Run the tests and execute all four notebooks:
 | `01_rt_to_frequency` | Ambegaokar–Baratoff + transmon chain; Fraunhofer design point; exact diagonalisation |
 | `02_synthetic_wafer` | 200 mm synthetic wafer; predicted vs measured f01 |
 | `03_collision_yield` | Reproduction of Hertzberg et al. 2021; bridge from wafer spread to yield |
-| `04_die_ranking` | Die ranking, residual sweep, calibration, drift (expected vs actual for each experiment) |
+| `04_die_ranking` | Die ranking, residual sweep, calibration, drift, realism sweep with capacitor scatter and ageing (expected vs actual for each experiment) |
 
 ## References
 
@@ -110,6 +140,8 @@ Run the tests and execute all four notebooks:
 - C. Križan et al., *Electrical post-fabrication tuning of aluminum Josephson junctions at room temperature*, Materials for Quantum Technology (2026), [doi:10.1088/2633-4356/ae7fe1](https://iopscience.iop.org/article/10.1088/2633-4356/ae7fe1/meta), [arXiv:2602.20002](https://arxiv.org/abs/2602.20002).
 - X. Wang et al., *Scaling Alternating-Bias-Assisted Annealing for Precision Transmon Frequency Targeting on Superconducting Quantum Processors*, [arXiv:2608.27789](https://arxiv.org/abs/2608.27789) (2026).
 - J. M. Kreikebaum et al., *Improving wafer-scale Josephson junction resistance variation in superconducting quantum coherent circuits*, Supercond. Sci. Technol. 33, 06LT02 (2020), [doi:10.1088/1361-6668/ab8617](https://doi.org/10.1088/1361-6668/ab8617), [arXiv:1909.09165](https://arxiv.org/abs/1909.09165), including its supplementary material.
+- A. Osman et al., *Mitigation of frequency collisions in superconducting quantum processors*, Phys. Rev. Research 5, 043001 (2023), [doi:10.1103/PhysRevResearch.5.043001](https://doi.org/10.1103/PhysRevResearch.5.043001).
+- A. Stehli et al., *Coherent superconducting qubits from a subtractive junction fabrication process*, Appl. Phys. Lett. 117, 124005 (2020), [doi:10.1063/5.0023533](https://doi.org/10.1063/5.0023533), [arXiv:2006.16862](https://arxiv.org/abs/2006.16862).
 - J. Koch et al., *Charge-insensitive qubit design derived from the Cooper pair box*, Phys. Rev. A 76, 042319 (2007).
 - V. Ambegaokar and A. Baratoff, Phys. Rev. Lett. 10 (1963) (critical current from normal-state resistance).
 - [scqubits](https://scqubits.readthedocs.io) (used only in tests, as an independent check of the transmon spectrum).
